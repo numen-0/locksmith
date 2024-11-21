@@ -1,0 +1,13 @@
+┏┳┓┏━┓┳━┓┏━┓
+ ┃ ┃ ┃┃ ┃┃ ┃
+ ┻ ┗━┛┻━┛┗━┛
+proyect:
+[_] README
+[_] clean stuff
+keygen:
+[_] generate encoder and decoder keys (weights)
+[_] fast and reliable
+encode:
+[_] do the thing
+decode:
+[_] do the thing
