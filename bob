@@ -1,0 +1,20 @@
+#!/bin/sh
+
+set -eu
+
+C="\e[92m"
+R="\e[0m"
+BOB="( c-[//]-[//])"
+# quiet=true
+
+bob_say() {
+    printf "${C}%s${R}\n" "$1"
+}
+
+
+bob_say "bob is cooking $BOB"
+. ./venv/bin/activate
+
+python ./keygen.py
+
+bob_say "bob coocked $BOB"
