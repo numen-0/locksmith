@@ -14,6 +14,7 @@ import torch.optim as optim
 import numpy as np
 
 import time
+from math import log2
 import random
 
 
@@ -21,16 +22,14 @@ import random
 torch.manual_seed(0xabad_1dea)
 random.seed(0xabad_1dea)
 
-# Hyperparameters
+# Hyperparameters # Ensure all are power of 2 for bigger placebo effect
 LATENT_DIM = 8        # Dimension of encoded representation
-BATCH_SIZE = 2 ** 10  # Ensure this is a power of 2
-EPOCHS = 2 ** 3       # NOTE: train loops will be EPOCHS * ERAS
-ERAS = 2 ** 10
+BATCH_SIZE = 2 ** 14  # big batch_size makes big changes o_o
+EPOCHS = 2 ** 3       # train loops will be EPOCHS * ERAS adjust them to print
+ERAS = 2 ** 10        # more or less text
 LEARNING_RATE = 0.00001  # I tryed to move this, I think this is the sweet spot
 
-# Ensure BATCH_SIZE is a power of 2
-if BATCH_SIZE & (BATCH_SIZE - 1) != 0:
-    raise ValueError("BATCH_SIZE must be a power of 2.")
+HIDEN_NEURONS_PER_LAYER = 32
 
 # Input type and value range
 """
@@ -47,6 +46,19 @@ max_int = N - 1       # max_int is now 65535 for uint16
 
 
 # net #########################################################################
+class RoundActivation(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input):
+        return torch.round(input)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output  # Pass-through gradient (non-differentiable)
+
+
+round_activation = RoundActivation.apply
+
+
 class Encoder(nn.Module):
     def __init__(self, input_dim, latent_dim):
         super(Encoder, self).__init__()
@@ -54,9 +66,29 @@ class Encoder(nn.Module):
             # nn.Linear(input_dim, input_dim),
             # nn.ReLU(),
             # nn.Linear(input_dim, latent_dim),
-            nn.Linear(input_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, latent_dim),
+            # nn.Linear(input_dim, HIDEN_NEURONS_PER_LAYER),
+            # nn.ReLU(),
+            # nn.Linear(HIDEN_NEURONS_PER_LAYER, HIDEN_NEURONS_PER_LAYER),
+            # nn.ReLU(),
+            # nn.Linear(HIDEN_NEURONS_PER_LAYER, HIDEN_NEURONS_PER_LAYER),
+            # nn.ReLU(),
+            # nn.Linear(HIDEN_NEURONS_PER_LAYER, HIDEN_NEURONS_PER_LAYER),
+            # nn.ReLU(),
+            # nn.Linear(HIDEN_NEURONS_PER_LAYER, latent_dim),
+            # nn.Linear(input_dim, HIDEN_NEURONS_PER_LAYER), # really bad
+            # nn.BatchNorm1d(HIDEN_NEURONS_PER_LAYER),
+            # nn.LeakyReLU(0.01),
+            # nn.Linear(HIDEN_NEURONS_PER_LAYER, HIDEN_NEURONS_PER_LAYER),
+            # nn.BatchNorm1d(HIDEN_NEURONS_PER_LAYER),
+            # nn.LeakyReLU(0.01),
+            # nn.Linear(HIDEN_NEURONS_PER_LAYER, latent_dim),
+            # nn.GELU(),
+            # nn.Linear(HIDEN_NEURONS_PER_LAYER, HIDEN_NEURONS_PER_LAYER),
+            nn.Linear(input_dim, HIDEN_NEURONS_PER_LAYER),
+            torch.nn.SiLU(),
+            nn.Linear(HIDEN_NEURONS_PER_LAYER, HIDEN_NEURONS_PER_LAYER),
+            torch.nn.SiLU(),
+            nn.Linear(HIDEN_NEURONS_PER_LAYER, latent_dim),
         )
 
     def forward(self, x):
@@ -67,23 +99,23 @@ class Decoder(nn.Module):
     def __init__(self, latent_dim, output_dim):
         super(Decoder, self).__init__()
         self.fc = nn.Sequential(
-            # nn.Linear(latent_dim, latent_dim),
-            # nn.ReLU(),
-            # nn.Linear(latent_dim, output_dim),
-            nn.Linear(latent_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, output_dim),
+            nn.Linear(latent_dim, HIDEN_NEURONS_PER_LAYER),
+            torch.nn.SiLU(),
+            nn.Linear(HIDEN_NEURONS_PER_LAYER, HIDEN_NEURONS_PER_LAYER),
+            torch.nn.SiLU(),
+            nn.Linear(HIDEN_NEURONS_PER_LAYER, output_dim),
         )
 
     def forward(self, x):
-        return self.fc(x)
+        x = self.fc(x)
+        return round_activation(x)
 
 
 class Autoencoder(nn.Module):
     def __init__(self, input_dim, latent_dim):
         super(Autoencoder, self).__init__()
-        self.encoder = Encoder(input_dim, 128)
-        self.decoder = Decoder(128, input_dim)
+        self.encoder = Encoder(input_dim, latent_dim)
+        self.decoder = Decoder(latent_dim, input_dim)
 
     def forward(self, x):
         encoded = self.encoder(x)
@@ -102,7 +134,7 @@ def sample_random_dataset(batch_size, key_length):
         for _ in range(batch_size)
     ]
 
-    dataset_tensor = torch.tensor(dataset, dtype=dtype)
+    dataset_tensor = torch.tensor(dataset, dtype=torch.float32)
 
     return dataset_tensor
 
@@ -129,7 +161,7 @@ def sample_slice_dataset_py(offset, batch_size, key_length):
 
     # Convert to numpy array or torch tensor
     chunks_np = np.array(chunks, dtype=np.uint16)
-    return torch.tensor(chunks_np, dtype=torch.uint16)
+    return torch.tensor(chunks_np, dtype=torch.float32)
 
 
 def sample_slice_dataset_np(offset, batch_size, key_length):
@@ -150,7 +182,7 @@ def sample_slice_dataset_np(offset, batch_size, key_length):
 
     chunks = np.flip(chunks, axis=1).copy()
 
-    dataset_tensor = torch.tensor(chunks, dtype=dtype)
+    dataset_tensor = torch.tensor(chunks, dtype=torch.float32)
 
     return dataset_tensor
 
@@ -160,17 +192,22 @@ def train_model(key_length):
     latent_dim = LATENT_DIM
     epochs = EPOCHS
     eras = ERAS
-    total_permutations = N ** key_length
+    P = N ** key_length  # total_permutations
+    M = eras * epochs * batch_size
+    sorted_batches = [(offset, min(batch_size, P - offset))
+                      for offset in range(0, P, batch_size)]
+    # batches = sorted_batches.copy() # for full range
 
     print("training model:")
-    print(f"    key_length:    {key_length} (input vect dim (decoded))")
-    print(f"    key_size:      {bytes_n}B (each vect value size)")
-    print(f"    latent_dim:    {LATENT_DIM}x32 (out vect dim (encoded))")
-    print(f"    epochs:        {EPOCHS}")
-    print(f"    eras:          {ERAS}")
-    print(f"    batch_size:    {BATCH_SIZE}")
-    print(f"    N:             {total_permutations}")
-    print(f"    first cycle M: {eras * epochs * batch_size}")
+    print(f"    key_length:     {key_length} (input vect dim (decoded))")
+    print(f"    key_size:       {bytes_n}B (each vect value size)")
+    print(f"    latent_dim:     {LATENT_DIM}x32 (out vect dim (encoded))")
+    print(f"    learning_rate:  {LEARNING_RATE}")
+    print(f"    epochs:         {log2(EPOCHS):02d} = log2({EPOCHS})")
+    print(f"    eras:           {log2(ERAS):02d} = log2({ERAS})")
+    print(f"    batch_size:     {log2(BATCH_SIZE):02d} = log2({BATCH_SIZE})")
+    print(f"    N (full range): {log2(P):02d} = log2({P})")
+    print(f"    M (per cycle):  {log2(M):02d} = log2({M})")
 
     if key_length <= 4:
         sample_slice_dataset = sample_slice_dataset_np
@@ -181,81 +218,83 @@ def train_model(key_length):
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-    # Record overall training start time
     overall_start_time = time.time()
     while True:
         print("starting a new training cycle...")
         for epoch in range(1, epochs + 1):
+            total_loss = 0.0
             epoch_start_time = time.time()
+            '''
+            random and full range work:
+              key_length: 1
+                random: 310.53s
+                full:   365.95
+            '''
             for _ in range(eras):
                 train_batch = sample_random_dataset(batch_size, key_length)
-
+            # np.random.shuffle(batches)  # Shuffle batch order
+            # for offset, b_size in batches:
+            #     train_batch = sample_slice_dataset(offset,
+            #                                        b_size,
+            #                                        key_length)
+            #
+            #     random.shuffle(train_batch)
                 # Forward pass
                 optimizer.zero_grad()
-                outputs = model(train_batch.float())
-                loss = criterion(outputs, train_batch.float())
+                outputs = model(train_batch)
+                loss = criterion(outputs, train_batch)
+                # total_loss += loss.item() * b_size  # Scale by batch size
+                total_loss += loss.item() * batch_size  # Scale by batch size
 
                 # Backward pass and optimization
                 loss.backward()
-                #  Apply gradient clipping
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
             # Record epoch duration
             epoch_duration = time.time() - epoch_start_time
-            print(f"    epoch [{epoch}/{epochs}], loss: {loss.item():.4f}, "
+            avg_loss = total_loss / P
+            print(f"    epoch [{epoch}/{epochs}], avg_loss: {avg_loss:.6f}, "
                   f"time: {epoch_duration:.2f}s")
-        # eval_start_time = time.time()
+            if total_loss == 0.0:
+                print("    -> total_loss == 0.0f, testing")
+                break
+
         correct = 0
         print(
             "|- testing full range -----------------------------------------|"
             "\n ", end="")
 
         with torch.no_grad():
-            step = total_permutations // 64
+            step = P // 64
             next = step
-            for offset in range(0, total_permutations, batch_size):
+            for offset, b_size in sorted_batches:
                 if offset >= next:
                     print("=", end="", flush=True)
                     next += step
-                batch_size_adjusted = min(batch_size,
-                                          total_permutations - offset)
-
                 test_batch = sample_slice_dataset(offset,
-                                                  batch_size_adjusted,
+                                                  b_size,
                                                   key_length)
                 # predicts
-                outputs = model(test_batch.float())
+                outputs = model(test_batch)
 
                 c = torch.sum(torch.all(
-                    outputs.int() == test_batch.int(), dim=1
+                    torch.round(outputs) == test_batch, dim=1
                 )).item()
                 correct += c
 
-                if c != batch_size_adjusted:
-                    print(f"\nhe needs more thinking ({
-                          correct}/{offset + batch_size})...")
-                    break  # instead of going throw all, for now commented
+                if c != b_size:
+                    print(f"\n    need more trainning; total: {
+                        P}; correct: {correct}/{
+                        offset + b_size};")
+                    break
 
-        # eval_duration = time.time() - eval_start_time
-        # accuracy = correct / total_permutations * 100
-        # print("")
-        # print(
-        #     "= health check ================================================="
-        #     f"\n    validation acc: {accuracy:.2f}%, "
-        #     f"{correct}/{total_permutations}, "
-        #     f"evaluation Time: {eval_duration:.2f}s\n"
-        #     "================================================================"
-        # )
-
-        if correct == total_permutations:
-            print("Perfect accuracy achieved. Stopping training.")
+        if correct == P:
+            print("\nPerfect accuracy achieved. Stopping training.")
             break
-        # NOTE: reduce loops each loop we hope to need less to archieve our goal
-        # if accuracy > 75.0:
-        #     epochs = 4 if epochs <= 4 else epochs // 2
-        #     eras = 64 if eras <= 16 else eras // 2
-    # Record overall training duration
+
+        # epochs = 4 if epochs <= 4 else epochs // 2
+        # eras = 64 if eras <= 64 else eras // 2
     overall_duration = time.time() - overall_start_time
     print(f"Training completed in {overall_duration:.2f}s")
 
@@ -302,7 +341,11 @@ def test_autoencoder_full_range(model, key_length, batch_size=10):
     :param key_length: The length of each key in the dataset.
     """
     print("=" * 50)
-    print("Testing the model on all values from 0x0000 to 0xFFFF...\n")
+    print("Testing the model on all values from 0x0000 to 0xFFFF...")
+
+    total_permutations = N ** key_length
+    batches = [(offset, min(batch_size, total_permutations - offset))
+               for offset in range(0, total_permutations, batch_size)]
 
     if key_length <= 4:
         sample_slice_dataset = sample_slice_dataset_np
@@ -312,25 +355,23 @@ def test_autoencoder_full_range(model, key_length, batch_size=10):
 
     with torch.no_grad():  # Disable gradient computation for inference
         correct = 0
-        for offset in range(0, total_permutations, batch_size):
-            batch_size_adjusted = min(batch_size,
-                                      total_permutations - offset)
-            test_batch = sample_slice_dataset(offset, batch_size_adjusted,
-                                              key_length)
+        for offset, b_size in batches:
+            test_batch = sample_slice_dataset(offset, b_size, key_length)
 
             # Encode and decode the batch
-            encoded = model.encoder(test_batch.float())  # Add batch dimension
+            encoded = model.encoder(test_batch)  # Add batch dimension
             decoded = model.decoder(encoded)
             correct += torch.sum(torch.all(
-                decoded.int() == test_batch.int(), dim=1
+                torch.round(decoded) == test_batch, dim=1
             )).item()
         accuracy = correct / total_permutations * 100
         print(f"    validation acc: {accuracy:.2f}%")
+    print("=" * 50)
 
 
 # main ########################################################################
 if __name__ == "__main__":
-    key_length = 1
+    key_length = 2
     model = train_model(key_length)
     test_autoencoder(model, key_length)
     test_autoencoder_full_range(model, key_length)

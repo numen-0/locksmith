@@ -15,6 +15,6 @@ bob_say() {
 bob_say "bob is cooking $BOB"
 . ./venv/bin/activate
 
-python ./keygen.py
+time python ./keygen.py
 
 bob_say "bob coocked $BOB"
